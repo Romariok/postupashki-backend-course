@@ -190,6 +190,95 @@ func TestUnlockWithoutLockPanics(t *testing.T) {
 		var rw RWMutex
 		rw.RUnlock()
 	})
+
+	t.Run("RUnlockWhileWriterLocked", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("RUnlock при захваченном writer lock должен паниковать")
+			}
+		}()
+		var rw RWMutex
+		rw.Lock()
+		rw.RUnlock()
+	})
+}
+
+func TestConcurrentDoubleRUnlockPanics(t *testing.T) {
+	var rw RWMutex
+	rw.RLock()
+	panicked := make(chan bool, 2)
+	for range 2 {
+		go func() {
+			didPanic := false
+			defer func() {
+				if recover() != nil {
+					didPanic = true
+				}
+				panicked <- didPanic
+			}()
+			rw.RUnlock()
+		}()
+	}
+	if first, second := <-panicked, <-panicked; first == second {
+		t.Fatalf("ровно один из двух RUnlock должен паниковать, получено %v и %v", first, second)
+	}
+}
+
+func TestWaitingWriterBlocksNewReaders(t *testing.T) {
+	var rw RWMutex
+	rw.RLock()
+
+	writerAcquired := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	go func() {
+		rw.Lock()
+		close(writerAcquired)
+		<-releaseWriter
+		rw.Unlock()
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for atomic.LoadUint32(&rw.writers) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if atomic.LoadUint32(&rw.writers) == 0 {
+		t.Fatal("писатель не объявил об ожидании")
+	}
+
+	readerAcquired := finished(func() {
+		rw.RLock()
+		rw.RUnlock()
+	})
+	rw.RUnlock()
+
+	select {
+	case <-readerAcquired:
+		t.Fatal("новый читатель обогнал ожидающего писателя")
+	case <-writerAcquired:
+	}
+	close(releaseWriter)
+	select {
+	case <-readerAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("читатель не проснулся после писателя")
+	}
+}
+
+func TestReaderDoesNotSleepOnZeroState(t *testing.T) {
+	var rw RWMutex
+	atomic.StoreUint32(&rw.writers, 1)
+	reader := finished(func() {
+		rw.RLock()
+		rw.RUnlock()
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	atomic.StoreUint32(&rw.writers, 0)
+	select {
+	case <-reader:
+	case <-time.After(time.Second):
+		t.Fatal("читатель уснул на нулевом state и пропустил уход писателя")
+	}
 }
 
 func BenchmarkReadHeavy(b *testing.B) {

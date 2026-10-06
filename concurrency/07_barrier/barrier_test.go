@@ -1,6 +1,7 @@
 package barrier
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -58,6 +59,19 @@ func TestSingleParticipant(t *testing.T) {
 	case <-finished(b.Wait):
 	case <-time.After(time.Second):
 		t.Fatal("барьер на одного не должен блокировать")
+	}
+}
+
+func TestNonPositiveSizePanics(t *testing.T) {
+	for _, size := range []int{0, -1} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("неположительный размер должен паниковать")
+				}
+			}()
+			New(size)
+		})
 	}
 }
 

@@ -143,6 +143,25 @@ func TestZeroPermits(t *testing.T) {
 	}
 }
 
+func TestNegativePermitsPanic(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("отрицательное число разрешений должно паниковать")
+		}
+	}()
+	New(-1)
+}
+
+func TestReleaseOverflowPanics(t *testing.T) {
+	s := &Semaphore{permits: ^uint32(0)}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("переполнение числа разрешений должно паниковать")
+		}
+	}()
+	s.Release()
+}
+
 func TestAllWaitersWakeUp(t *testing.T) {
 	s := New(0)
 	const waiters = 30

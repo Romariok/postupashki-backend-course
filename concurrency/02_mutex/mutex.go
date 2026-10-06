@@ -1,8 +1,8 @@
 package mutex
 
 import (
-	"sync/atomic"
 	"primitives/internal/futex"
+	"sync/atomic"
 )
 
 const (
@@ -20,13 +20,14 @@ func (m *Mutex) Lock() {
 		return
 	}
 
-	for {
-		if atomic.LoadUint32(&m.state) == contended || !atomic.CompareAndSwapUint32(&m.state, held, contended) {
-			futex.Wait(&m.state, contended)
+	for range 10 {
+		if m.TryLock() {
+			return
 		}
-		if atomic.CompareAndSwapUint32(&m.state, free, contended) {
-			break
-		}
+	}
+
+	for atomic.SwapUint32(&m.state, contended) != free {
+		futex.Wait(&m.state, contended)
 	}
 }
 

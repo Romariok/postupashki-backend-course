@@ -1,6 +1,7 @@
 package once
 
 import (
+	"primitives/internal/futex"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -105,19 +106,46 @@ func TestDoWaitsForTheWinner(t *testing.T) {
 func TestPanicCountsAsDone(t *testing.T) {
 	var o Once
 	calls := 0
+	var recovered any
 
 	func() {
-		defer func() { recover() }()
+		defer func() { recovered = recover() }()
 		o.Do(func() {
 			calls++
 			panic("упало")
 		})
 	}()
+	if recovered != "упало" {
+		t.Fatalf("Do должен пробросить панику, получено %v", recovered)
+	}
 
 	o.Do(func() { calls++ })
 
 	if calls != 1 {
 		t.Fatalf("после паники функция вызвана ещё раз: всего %d", calls)
+	}
+}
+
+func TestSpuriousWakeDoesNotReturn(t *testing.T) {
+	var o Once
+	atomic.StoreUint32(&o.state, running)
+
+	returned := finished(func() { o.Do(func() { t.Error("функция не должна запускаться") }) })
+	time.Sleep(20 * time.Millisecond)
+	futex.WakeAll(&o.state)
+
+	select {
+	case <-returned:
+		t.Fatal("Do вернулся после ложного пробуждения")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	atomic.StoreUint32(&o.state, done)
+	futex.WakeAll(&o.state)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("Do не вернулся после завершения")
 	}
 }
 
