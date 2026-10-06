@@ -48,7 +48,7 @@ private fun route(file: File, destination: Long) {
         .filter { it.isNotEmpty() && !it.startsWith("#") }
         .map {
             val fields = it.split(Regex("\\s+"))
-            require(fields.size == 2) { "invalid route: $it" }
+            require(fields.size >= 2) { "invalid route: $it" }
             Route(parseCidr(fields[0]), fields[1])
         }
         .filter { destination and it.cidr.mask == it.cidr.network }
@@ -64,6 +64,7 @@ private fun route(file: File, destination: Long) {
 private fun parseCidr(value: String): Cidr {
     val parts = value.split('/')
     require(parts.size == 2) { "invalid CIDR: $value" }
+    require(parts[1].isNotEmpty() && parts[1].all { it in '0'..'9' }) { "invalid prefix: ${parts[1]}" }
     val prefix = parts[1].toIntOrNull()
     require(prefix != null && prefix in 0..32) { "invalid prefix: ${parts[1]}" }
     return Cidr(parseIp(parts[0]), prefix)
@@ -73,7 +74,9 @@ private fun parseIp(value: String): Long {
     val parts = value.split('.')
     require(parts.size == 4) { "invalid IPv4 address: $value" }
     return parts.fold(0L) { result, part ->
-        require(part.isNotEmpty() && part.all(Char::isDigit)) { "invalid IPv4 address: $value" }
+        require(part.isNotEmpty() && part.all { it in '0'..'9' } && (part.length == 1 || part[0] != '0')) {
+            "invalid IPv4 address: $value"
+        }
         val octet = part.toIntOrNull()
         require(octet != null && octet in 0..255) { "invalid IPv4 address: $value" }
         (result shl 8) or octet.toLong()

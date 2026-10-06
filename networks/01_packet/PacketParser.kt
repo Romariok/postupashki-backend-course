@@ -1,5 +1,6 @@
 import java.nio.ByteBuffer
 import java.util.HexFormat
+import kotlin.system.exitProcess
 
 data class Ethernet(val destination: String, val source: String, val etherType: Int)
 
@@ -30,8 +31,13 @@ data class Tcp(
 data class Udp(val sourcePort: Int, val destinationPort: Int, val length: Int)
 
 fun main() {
-    val hex = System.`in`.readAllBytes().toString(Charsets.US_ASCII).replace(Regex("[\\s:]"), "")
-    parse(HexFormat.of().parseHex(hex))
+    try {
+        val hex = System.`in`.readAllBytes().toString(Charsets.US_ASCII).replace(Regex("[\\s:]"), "")
+        parse(HexFormat.of().parseHex(hex))
+    } catch (e: Exception) {
+        System.err.println(e.message ?: "invalid input")
+        exitProcess(1)
+    }
 }
 
 private fun parse(frame: ByteArray) {
@@ -79,7 +85,7 @@ private fun parse(frame: ByteArray) {
         destination,
         checksumValid(frame, ipStart, ihlBytes),
     )
-    print(ipv4)
+    printIpv4(ipv4)
 
     val transportStart = ipStart + ihlBytes
     val ipEnd = ipStart + totalLength
@@ -93,14 +99,14 @@ private fun parse(frame: ByteArray) {
             require(tcp.dataOffsetBytes >= 20 && transportStart + tcp.dataOffsetBytes <= ipEnd) {
                 "Invalid TCP header length"
             }
-            print(tcp)
+            printTcp(tcp)
             println("payload.length ${ipEnd - transportStart - tcp.dataOffsetBytes}")
         }
         protocol == 17 -> {
             require(ipEnd - transportStart >= 8) { "UDP header is truncated" }
             val udp = Udp(buffer.u16(), buffer.u16(), buffer.u16())
             buffer.short
-            print(udp)
+            printUdp(udp)
             println("payload.length ${ipEnd - transportStart - 8}")
         }
         else -> println("payload.length ${ipEnd - transportStart}")
@@ -127,7 +133,7 @@ private fun tcp(buffer: ByteBuffer): Tcp {
     )
 }
 
-private fun print(ip: Ipv4) {
+private fun printIpv4(ip: Ipv4) {
     println("ip.version ${ip.version}")
     println("ip.ihl_bytes ${ip.ihlBytes}")
     println("ip.total_length ${ip.totalLength}")
@@ -141,7 +147,7 @@ private fun print(ip: Ipv4) {
     println("ip.checksum_valid ${ip.checksumValid}")
 }
 
-private fun print(tcp: Tcp) {
+private fun printTcp(tcp: Tcp) {
     println("tcp.src_port ${tcp.sourcePort}")
     println("tcp.dst_port ${tcp.destinationPort}")
     println("tcp.seq ${tcp.sequenceNumber}")
@@ -151,7 +157,7 @@ private fun print(tcp: Tcp) {
     println("tcp.window ${tcp.window}")
 }
 
-private fun print(udp: Udp) {
+private fun printUdp(udp: Udp) {
     println("udp.src_port ${udp.sourcePort}")
     println("udp.dst_port ${udp.destinationPort}")
     println("udp.length ${udp.length}")

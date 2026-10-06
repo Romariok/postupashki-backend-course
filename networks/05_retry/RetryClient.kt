@@ -1,5 +1,8 @@
-import java.net.HttpURLConnection
 import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.time.Duration
 import kotlin.random.Random
 import kotlin.system.exitProcess
 
@@ -7,6 +10,9 @@ data class Config(val url: String, val method: String, val maxAttempts: Int, val
 data class Attempt(val status: Int?, val error: String?, val retryAfterMs: Long?)
 
 fun main(args: Array<String>) {
+    // One call to request must mean exactly one request on the wire.
+    System.setProperty("jdk.httpclient.disableRetryConnect", "true")
+    System.setProperty("jdk.httpclient.redirects.retrylimit", "1")
     val config = try {
         parseArgs(args)
     } catch (e: Exception) {
@@ -52,41 +58,34 @@ private fun parseArgs(args: Array<String>): Config {
         index += 2
     }
     require(maxAttempts > 0) { "max attempts must be positive" }
-    return Config(args[0], method, maxAttempts, key)
+    return Config(args[0], method.uppercase(), maxAttempts, key)
 }
 
 private fun request(config: Config): Attempt {
-    var connection: HttpURLConnection? = null
     return try {
-        connection = URI(config.url).toURL().openConnection() as HttpURLConnection
-        connection.requestMethod = config.method
-        connection.connectTimeout = 5000
-        connection.readTimeout = 5000
-        connection.instanceFollowRedirects = false
-        connection.setRequestProperty("Connection", "close")
-        config.idempotencyKey?.let { connection.setRequestProperty("Idempotency-Key", it) }
-        val status = connection.responseCode
-        (if (status >= 400) connection.errorStream else connection.inputStream)?.use { it.readAllBytes() }
-        val retryAfter = connection.getHeaderField("Retry-After")?.toLongOrNull()?.takeIf { it >= 0 }?.let {
+        val client = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .followRedirects(HttpClient.Redirect.NEVER)
+            .build()
+        val request = HttpRequest.newBuilder(URI(config.url))
+            .timeout(Duration.ofSeconds(5))
+            .method(config.method, HttpRequest.BodyPublishers.noBody())
+            .apply { config.idempotencyKey?.let { header("Idempotency-Key", it) } }
+            .build()
+        val response = client.send(request, HttpResponse.BodyHandlers.ofByteArray())
+        val retryAfter = response.headers().firstValue("Retry-After").orElse(null)?.toLongOrNull()?.takeIf { it >= 0 }?.let {
             if (it > Long.MAX_VALUE / 1000) Long.MAX_VALUE else it * 1000
         }
-        Attempt(status, null, retryAfter)
+        Attempt(response.statusCode(), null, retryAfter)
     } catch (e: Exception) {
         Attempt(null, e.message?.takeIf(String::isNotBlank) ?: e.javaClass.simpleName, null)
-    } finally {
-        connection?.disconnect()
     }
 }
 
 private fun retryable(config: Config, attempt: Attempt): Boolean {
-    val methodCanRetry = config.method.uppercase() in setOf("GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE") ||
-        config.method.equals("POST", true) && config.idempotencyKey != null
+    val methodCanRetry = config.method in setOf("GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE") ||
+        config.method == "POST" && config.idempotencyKey != null
     return methodCanRetry && (attempt.status == null || attempt.status in setOf(429, 500, 502, 503, 504))
 }
 
-private fun backoff(nextAttempt: Int) = when (nextAttempt) {
-    2 -> 400L
-    3 -> 800L
-    4 -> 1600L
-    else -> 2000L
-}
+private fun backoff(nextAttempt: Int) = minOf(2000L, 200L shl (nextAttempt - 1).coerceAtMost(4))

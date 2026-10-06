@@ -158,6 +158,15 @@ class SubnetProperties(unittest.TestCase):
             "для длины префикса 33 ожидался ненулевой код возврата, получен 0\n"
             "stdout: %s" % out)
 
+    def test_prefix_accepts_only_ascii_digits_without_sign(self):
+        for prefix in ("+24", "-0", "٢٤"):
+            code, out, err = run(["subnet", "10.0.0.1/" + prefix], timeout=TIMEOUT)
+            self.assertNotEqual(0, code, "prefix %r must be rejected; stdout: %s" % (prefix, out))
+
+    def test_leading_zero_octet_is_rejected(self):
+        code, out, err = run(["subnet", "010.1.1.1/24"], timeout=TIMEOUT)
+        self.assertNotEqual(0, code, "IPv4 octets with leading zero must be rejected; stdout: %s" % out)
+
 
 class RouteSelection(unittest.TestCase):
     def test_longest_prefix_wins(self):
@@ -207,6 +216,10 @@ class RouteSelection(unittest.TestCase):
             "при найденном маршруте ожидался код возврата 0, получен %d\nstderr: %s"
             % (code, err))
         expect(self, fields(out), {"via": "eth4", "prefix": "16"})
+
+    def test_trailing_route_fields_are_ignored(self):
+        got = route_ok(self, "0.0.0.0/0 eth0 100 extra\n", "8.8.8.8")
+        expect(self, got, {"via": "eth0", "prefix": "0"})
 
 
 if __name__ == "__main__":

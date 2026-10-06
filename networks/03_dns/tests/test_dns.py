@@ -232,6 +232,23 @@ class QueryFormat(DnsTestCase):
                for name, query in zip(names, server.requests)}
         expect(self, got, {name: str(TYPE_CODES[name]) for name in names})
 
+    def test_lowercase_type_is_accepted(self):
+        server = self.serve(lambda query: respond(query))
+        block = self.one(server, "example.com a")
+        expect(self, printed(block), {"query": "example.com a", "status": "NOERROR"})
+        self.assertEqual(1, server.requests[0].qtype)
+
+    def test_unknown_type_does_not_stop_following_queries(self):
+        server = self.serve(lambda query: respond(query))
+        code, out, err = run(args=[HOST, server.port],
+                             stdin="example.com UNKNOWN\nexample.com A\n", timeout=30)
+        self.assertEqual(0, code, err)
+        result = blocks(out)
+        self.assertEqual(1, len(result), out)
+        expect(self, printed(result[0]), {"query": "example.com A", "status": "NOERROR"})
+        self.assertIn("unsupported type", err)
+        self.assertNotIn("Exception", err)
+
     def test_response_with_foreign_identifier_is_ignored(self):
         def handler(query):
             wrong = bytearray(respond(query, [record(QUESTION_POINTER, 1, 60,
@@ -401,6 +418,23 @@ class ResponseCodes(DnsTestCase):
         server = self.serve(handler)
         first, second = self.ask(server, ["missing.example A", "present.example A"])
         expect(self, printed(first), {"status": "NXDOMAIN", "записей в ответе": "0"})
+        expect(self, printed(second), {
+            "status": "NOERROR",
+            "answer 1": "A 192.0.2.10 60",
+        })
+
+    def test_truncated_response_becomes_formerr_and_processing_continues(self):
+        def handler(query):
+            if query.name.startswith("broken."):
+                reply = bytearray(respond(query))
+                reply[6:8] = struct.pack("!H", 1)
+                return bytes(reply) + QUESTION_POINTER
+            return respond(query, [record(QUESTION_POINTER, 1, 60,
+                                          socket.inet_aton("192.0.2.10"))])
+
+        server = self.serve(handler)
+        first, second = self.ask(server, ["broken.example A", "good.example A"])
+        expect(self, printed(first), {"status": "FORMERR", "записей в ответе": "0"})
         expect(self, printed(second), {
             "status": "NOERROR",
             "answer 1": "A 192.0.2.10 60",

@@ -141,6 +141,13 @@ class InputFormat(unittest.TestCase):
     def test_uppercase_hex(self):
         expect(self, parse(SYN.upper()), {"ip.dst": "93.184.216.34"}, SYN.upper())
 
+    def test_invalid_input_has_no_stack_trace(self):
+        code, out, err = run(stdin="not-hex\n")
+        self.assertNotEqual(0, code)
+        self.assertEqual("", out)
+        self.assertNotIn("Exception", err)
+        self.assertEqual(1, len(err.splitlines()))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -26,13 +26,14 @@ fun main() {
 }
 
 private fun parse(buffer: ByteBuffer): HttpMessage {
-    val start = line(buffer) ?: throw ParseError("bad_start_line")
+    val start = line(buffer, "bad_start_line") ?: throw ParseError("bad_start_line")
     val request = Regex("^(\\S+) (\\S+) HTTP/1\\.1$").matchEntire(start)
     val response = Regex("^HTTP/1\\.1 ([0-9]{3}) (.*)$").matchEntire(start)
     if (request == null && response == null) throw ParseError("bad_start_line")
+    if (request != null && !request.groupValues[1].all(::headerNameCharacter)) throw ParseError("bad_start_line")
     val headers = mutableListOf<Header>()
     while (true) {
-        val value = line(buffer) ?: throw ParseError("bad_header")
+        val value = line(buffer, "bad_header") ?: throw ParseError("bad_header")
         if (value.isEmpty()) break
         val colon = value.indexOf(':')
         if (colon <= 0) throw ParseError("bad_header")
@@ -41,15 +42,22 @@ private fun parse(buffer: ByteBuffer): HttpMessage {
         headers += Header(name.lowercase(), value.substring(colon + 1).trim(' ', '\t'))
     }
     val contentLengths = headers.filter { it.name == "content-length" }.map {
-        if (it.value.isEmpty() || !it.value.all(Char::isDigit)) throw ParseError("bad_header")
-        it.value.toIntOrNull() ?: throw ParseError("bad_header")
+        if (it.value.isEmpty() || !it.value.all { char -> char in '0'..'9' }) throw ParseError("bad_header")
+        it.value.toLongOrNull() ?: throw ParseError("bad_header")
     }
-    val body = if (headers.any { it.name == "transfer-encoding" && it.value.equals("chunked", true) }) {
+    if (contentLengths.distinct().size > 1) throw ParseError("bad_header")
+    val lastTransferCoding = headers.asSequence()
+        .filter { it.name == "transfer-encoding" }
+        .flatMap { it.value.split(',').asSequence() }
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .lastOrNull()
+    val body = if (lastTransferCoding.equals("chunked", true)) {
         chunks(buffer)
     } else if (contentLengths.isNotEmpty()) {
         val length = contentLengths.first()
-        if (buffer.remaining() < length) throw ParseError("incomplete_body")
-        ByteArray(length).also(buffer::get)
+        if (length > buffer.remaining().toLong()) throw ParseError("incomplete_body")
+        ByteArray(length.toInt()).also(buffer::get)
     } else {
         ByteArray(0)
     }
@@ -63,17 +71,17 @@ private fun parse(buffer: ByteBuffer): HttpMessage {
 private fun chunks(buffer: ByteBuffer): ByteArray {
     val body = ByteArrayOutputStream()
     while (true) {
-        val rawSize = line(buffer) ?: throw ParseError("bad_chunk")
+        val rawSize = line(buffer, "bad_chunk") ?: throw ParseError("bad_chunk")
         val sizeText = rawSize.substringBefore(';')
         if (sizeText.isEmpty() || !sizeText.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) throw ParseError("bad_chunk")
         val size = sizeText.toLongOrNull(16)?.takeIf { it <= Int.MAX_VALUE }?.toInt() ?: throw ParseError("bad_chunk")
         if (size == 0) {
             while (true) {
-                val trailer = line(buffer) ?: throw ParseError("bad_chunk")
+                val trailer = line(buffer, "bad_chunk") ?: throw ParseError("bad_chunk")
                 if (trailer.isEmpty()) return body.toByteArray()
             }
         }
-        if (buffer.remaining() < size + 2) throw ParseError("bad_chunk")
+        if (size > buffer.remaining() - 2) throw ParseError("bad_chunk")
         val part = ByteArray(size)
         buffer.get(part)
         if (buffer.get() != 13.toByte() || buffer.get() != 10.toByte()) throw ParseError("bad_chunk")
@@ -81,15 +89,21 @@ private fun chunks(buffer: ByteBuffer): ByteArray {
     }
 }
 
-private fun line(buffer: ByteBuffer): String? {
+private fun line(buffer: ByteBuffer, error: String): String? {
     val start = buffer.position()
     var index = start
-    while (index + 1 < buffer.limit()) {
-        if (buffer.get(index) == 13.toByte() && buffer.get(index + 1) == 10.toByte()) {
-            val bytes = ByteArray(index - start)
-            buffer.get(bytes)
-            buffer.position(buffer.position() + 2)
-            return String(bytes, StandardCharsets.ISO_8859_1)
+    while (index < buffer.limit()) {
+        when (buffer.get(index)) {
+            10.toByte() -> throw ParseError(error)
+            13.toByte() -> {
+                if (index + 1 >= buffer.limit() || buffer.get(index + 1) != 10.toByte()) {
+                    throw ParseError(error)
+                }
+                val bytes = ByteArray(index - start)
+                buffer.get(bytes)
+                buffer.position(buffer.position() + 2)
+                return String(bytes, StandardCharsets.ISO_8859_1)
+            }
         }
         index++
     }

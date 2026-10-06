@@ -61,6 +61,7 @@ def _handler_class(owner):
         do_POST = respond
         do_PUT = respond
         do_DELETE = respond
+        do_PATCH = respond
 
         def log_message(self, fmt, *args):
             pass
@@ -121,6 +122,51 @@ class ScriptedServer:
         self._httpd.server_close()
 
 
+class RawServer:
+    """Минимальный TCP-сервер для обрывов и медленной выдачи тела."""
+
+    def __init__(self, handler):
+        self.handler = handler
+        self.requests = []
+        self.socket = socket.socket()
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind(("127.0.0.1", 0))
+        self.socket.listen()
+        self.socket.settimeout(0.05)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self):
+        host, port = self.socket.getsockname()
+        return "http://%s:%d/resource" % (host, port)
+
+    def _serve(self):
+        while not self._stop.is_set():
+            try:
+                connection, _ = self.socket.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with connection:
+                connection.settimeout(2)
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    part = connection.recv(4096)
+                    if not part:
+                        break
+                    request += part
+                self.requests.append(request)
+                self.handler(connection)
+
+    def stop(self):
+        self._stop.set()
+        self.socket.close()
+        self._thread.join(2)
+
+
 class Output:
     """Разбор вывода программы по строкам событий."""
 
@@ -178,6 +224,11 @@ def launch(url, options=(), timeout=30):
 class ClientCase(unittest.TestCase):
     def server(self, script):
         srv = ScriptedServer(script)
+        self.addCleanup(srv.stop)
+        return srv
+
+    def raw_server(self, handler):
+        srv = RawServer(handler)
         self.addCleanup(srv.stop)
         return srv
 
@@ -297,6 +348,25 @@ class Requests(ClientCase):
             ["POST"], srv.methods(),
             "с ключом --method POST ожидался метод POST, сервер получил %r" % (srv.methods(),))
 
+    def test_patch_reaches_server(self):
+        srv = self.server([200])
+        out = launch(srv.url, ["--method", "PATCH"], timeout=budget_s(1))
+        expect(self, out.summary(), {"result": "success", "attempts": "1"}, out.context())
+        self.assertEqual(["PATCH"], srv.methods())
+
+    def test_lowercase_method_is_normalized(self):
+        srv = self.server([200])
+        out = launch(srv.url, ["--method", "get"], timeout=budget_s(1))
+        expect(self, out.summary(), {"result": "success", "attempts": "1"}, out.context())
+        self.assertEqual(["GET"], srv.methods())
+
+    def test_broken_response_is_not_retried_inside_attempt(self):
+        srv = self.raw_server(lambda connection: None)
+        out = launch(srv.url, ["--max-attempts", "2"], timeout=budget_s(2))
+        expect(self, out.summary(), {"attempts": "2", "attempt_lines": "2"}, out.context())
+        self.assertEqual(2, len(srv.requests),
+                         "каждая напечатанная попытка должна создавать ровно один запрос")
+
     def test_every_printed_attempt_reaches_server(self):
         srv = self.server([503, 503, 200])
         out = launch(srv.url, timeout=budget_s(3))
@@ -321,6 +391,13 @@ class Idempotency(ClientCase):
             1, len(srv.requests),
             "POST без ключа идемпотентности не повторяется, "
             "ожидался один запрос, сервер получил %d" % len(srv.requests))
+
+    def test_broken_post_without_key_is_sent_once(self):
+        srv = self.raw_server(lambda connection: None)
+        out = launch(srv.url, ["--method", "POST", "--max-attempts", "2"],
+                     timeout=budget_s(1))
+        expect(self, out.summary(), {"attempts": "1", "attempt_lines": "1"}, out.context())
+        self.assertEqual(1, len(srv.requests))
 
     def test_post_with_key_is_retried(self):
         srv = self.server([503, 200])
@@ -463,6 +540,27 @@ class ConnectionFailure(ClientCase):
         self.assertTrue(
             out.attempts[0]["value"].strip(),
             "после слова error ожидается текст с причиной, получена строка без текста")
+
+    def test_attempt_timeout_includes_slow_response_body(self):
+        def drip(connection):
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n")
+            for _ in range(10):
+                try:
+                    connection.sendall(b"x")
+                except OSError:
+                    return
+                time.sleep(1)
+
+        srv = self.raw_server(drip)
+        started = time.monotonic()
+        out = launch(srv.url, ["--max-attempts", "1"], timeout=9)
+        spent = time.monotonic() - started
+        expect(self, out.summary(), {
+            "result": "failure",
+            "attempts": "1",
+            "statuses": "error",
+        }, out.context())
+        self.assertLess(spent, 7, "попытка с медленным телом длилась %.1f с" % spent)
 
 
 if __name__ == "__main__":

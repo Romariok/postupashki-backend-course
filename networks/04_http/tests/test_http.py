@@ -75,6 +75,10 @@ class RequestLine(unittest.TestCase):
         self.assertNotIn("status", got, "для запроса поле status выводить не следует")
         self.assertNotIn("reason", got, "для запроса поле reason выводить не следует")
 
+    def test_method_must_be_a_token(self):
+        expect_error(self, message("G(E)T / HTTP/1.1", ["Host: example.org"]),
+                     "bad_start_line")
+
 
 class StatusLine(unittest.TestCase):
     def test_status_and_reason(self):
@@ -169,6 +173,10 @@ class Body(unittest.TestCase):
                          "тело содержит непечатный байт, строку body.text выводить "
                          "не следует, получено %r" % (values(out, "body.text"),))
 
+    def test_equal_content_lengths_are_accepted(self):
+        msg = message("HTTP/1.1 200 OK", ["Content-Length: 5", "Content-Length: 5"], "hello")
+        expect(self, fields(parse(msg)), {"body.length": "5", "body.text": "hello"})
+
 
 class ChunkedBody(unittest.TestCase):
     def test_chunks_are_joined(self):
@@ -196,6 +204,11 @@ class ChunkedBody(unittest.TestCase):
         msg = message("HTTP/1.1 200 OK", ["Transfer-Encoding: chunked"], body)
         expect(self, fields(parse(msg)), {"body.length": "5", "body.text": "hello"})
 
+    def test_chunked_may_be_last_transfer_coding(self):
+        body = "5" + CRLF + "hello" + CRLF + "0" + CRLF + CRLF
+        msg = message("HTTP/1.1 200 OK", ["Transfer-Encoding: gzip, chunked"], body)
+        expect(self, fields(parse(msg)), {"body.length": "5", "body.text": "hello"})
+
 
 class BadMessage(unittest.TestCase):
     def test_bad_start_line(self):
@@ -214,6 +227,20 @@ class BadMessage(unittest.TestCase):
 
     def test_space_before_colon_is_rejected(self):
         expect_error(self, message("GET / HTTP/1.1", ["Host : example.org"]), "bad_header")
+
+    def test_bare_line_feed_inside_header_is_rejected(self):
+        expect_error(self, "GET / HTTP/1.1\r\nX-Test: a\nb\r\n\r\n", "bad_header")
+
+    def test_bare_carriage_return_inside_header_is_rejected(self):
+        expect_error(self, "GET / HTTP/1.1\r\nX-Test: a\rb\r\n\r\n", "bad_header")
+
+    def test_conflicting_content_lengths_are_rejected(self):
+        msg = message("HTTP/1.1 200 OK", ["Content-Length: 3", "Content-Length: 5"], "hello")
+        expect_error(self, msg, "bad_header")
+
+    def test_large_content_length_is_incomplete_body(self):
+        msg = message("HTTP/1.1 200 OK", ["Content-Length: 99999999999"], "hello")
+        expect_error(self, msg, "incomplete_body")
 
     def test_incomplete_body(self):
         msg = message("HTTP/1.1 200 OK", ["Content-Length: 10"], "abc")

@@ -14,24 +14,44 @@ data class Name(val value: String, val end: Int)
 val types = mapOf("A" to 1, "NS" to 2, "CNAME" to 5, "MX" to 15, "TXT" to 16, "AAAA" to 28)
 
 fun main(args: Array<String>) {
-    require(args.size == 2) { "usage: <server> <port>" }
-    val server = InetAddress.getByName(args[0])
-    val port = args[1].toInt()
+    val server: InetAddress
+    val port: Int
+    try {
+        require(args.size == 2) { "usage: <server> <port>" }
+        server = InetAddress.getByName(args[0])
+        port = args[1].toInt()
+        require(port in 1..65535) { "invalid port" }
+    } catch (e: Exception) {
+        System.err.println(e.message ?: "invalid arguments")
+        exitProcess(1)
+    }
     val cache = mutableMapOf<Pair<String, Int>, CacheEntry>()
     DatagramSocket().use { socket ->
         for (rawLine in System.`in`.bufferedReader().lineSequence()) {
             val line = rawLine.trim()
             if (line.isEmpty()) continue
             val fields = line.split(Regex("\\s+"))
-            require(fields.size == 2) { "invalid query: $line" }
+            if (fields.size != 2) {
+                System.err.println("invalid query: $line")
+                continue
+            }
             val name = fields[0]
-            val typeName = fields[1]
-            val type = types[typeName] ?: error("unsupported type: $typeName")
+            val typeName = fields[1].uppercase()
+            val type = types[typeName]
+            if (type == null) {
+                System.err.println("unsupported type: ${fields[1]}")
+                continue
+            }
             val key = name.lowercase().trimEnd('.') to type
-            println("query $line")
             val now = System.nanoTime()
             val cached = cache[key]?.takeIf { it.expiresAt > now }
-            val response = cached?.response ?: request(socket, server, port, name, type)
+            val response = try {
+                cached?.response ?: request(socket, server, port, name, type)
+            } catch (e: Exception) {
+                System.err.println(e.message ?: "invalid query: $line")
+                continue
+            }
+            println("query $line")
             if (response == null) {
                 println("status TIMEOUT")
                 println("end")
@@ -64,7 +84,11 @@ private fun request(socket: DatagramSocket, server: InetAddress, port: Int, name
             return null
         }
         if (packet.length >= 2 && ByteBuffer.wrap(bytes, 0, packet.length).u16() == id) {
-            return parseResponse(bytes.copyOf(packet.length))
+            return try {
+                parseResponse(bytes.copyOf(packet.length))
+            } catch (_: RuntimeException) {
+                DnsResponse("FORMERR", emptyList(), null)
+            }
         }
     }
 }
