@@ -5,3 +5,5 @@
 -- Порядок: country по возрастанию
 -- Строк:   15
 
+select country from players where mmr >=10000
+group by country order by country asc limit 15

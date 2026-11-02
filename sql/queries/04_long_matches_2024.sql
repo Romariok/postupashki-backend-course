@@ -6,3 +6,6 @@
 -- Порядок: started_at по возрастанию
 -- Строк:   78
 
+select match_id, started_at, duration_sec, winner from matches
+where duration_sec > 3600 and started_at > '2024-01-01 00:00:00+00'
+order by started_at asc limit 78
